@@ -1,0 +1,101 @@
+#!/usr/bin/env python
+
+import sys
+import os
+import json
+import re
+import socket
+import subprocess
+
+import logging
+logging.basicConfig(level=logging.ERROR)
+
+import pika
+
+GIT_BASE = '/home/git/repositories/'
+SSH_URL_TEMPLATE = 'git@' + socket.getfqdn() + ':{0}.git'
+
+RABBITMQ_HOST = 'localhost'
+RABBITMQ_PORT = 5672
+
+
+def git_get_commits(end, begin=None, limit=10):
+    """Return dictionary representation of git commit"""
+
+    # hash, commit date, author name, author email,
+    # committer name, committer email, subject
+    log_format = '%n'.join(['%cI', '%an', '%ae', '%cn', '%ce', '%s'])
+    git_args = ['rev-list',
+                '-n', str(limit),
+                '--format=format:'+log_format,
+                end]
+    if begin is not None:
+        git_args.append('^'+begin)
+    git = subprocess.Popen(['git'] + git_args,
+                           stdout=subprocess.PIPE)
+    stdout, stderr = git.communicate()
+    if git.wait() != 0:
+        raise Exception('Error running git process')
+
+    stdout = stdout.rstrip()
+    if stdout == '':
+        return
+
+    lines = stdout.split('\n')
+    while len(lines) > 0:
+        commit_lines, lines = lines[:7], lines[7:]
+        commit_id, timestamp, author_name, author_email = commit_lines[:4]
+        committer_name, committer_email, subject = commit_lines[4:]
+
+        # commit ID line starts with "commit "
+        _, commit_id = commit_id.split(' ', 1)
+
+        commit = {'id': commit_id, 'timestamp': timestamp,
+                  'author': {'name': author_name,
+                             'email': author_email},
+                  'committer': {'name': committer_name,
+                                'email': committer_email},
+                  'message': subject}
+
+        yield commit
+
+
+if __name__ == '__main__':
+    connection_params = pika.ConnectionParameters(host=RABBITMQ_HOST,
+                                                  port=RABBITMQ_PORT)
+    connection = pika.BlockingConnection(connection_params)
+    channel = connection.channel()
+
+    channel.exchange_declare(exchange='git', type='topic')
+
+    repo_path = os.path.abspath(os.environ.get('GIT_DIR', '.'))
+    m = re.match(r'^'+re.escape(GIT_BASE)+'(.*)\.git$', repo_path)
+    if not m:
+        raise Exception('GIT_DIR did not match pattern')
+    repo_name = m.group(1)
+
+    # Create repository reference
+    repository = {'full_name': repo_name,
+                  'ssh_url': SSH_URL_TEMPLATE.format(repo_name)}
+
+    # Each ref is given on stdin with before/after commit IDs
+    for line in sys.stdin:
+        before, after, ref = line.strip().split(' ', 2)
+        created = all(c == '0' for c in before)
+        deleted = all(c == '0' for c in after)
+
+        doc = {'repository': repository,
+               'ref': ref, 'before': before,
+               'after': after}
+
+        if not deleted:
+            last_commit = after
+            first_commit = None if created else before
+            commits = list(git_get_commits(last_commit, first_commit))
+            doc['commits'] = commits
+
+        channel.basic_publish(exchange='git',
+                              routing_key=repo_name,
+                              body=json.dumps(doc))
+
+    connection.close()
