@@ -84,9 +84,9 @@ if __name__ == '__main__':
         created = all(c == '0' for c in before)
         deleted = all(c == '0' for c in after)
 
-        doc = {'repository': repository,
-               'ref': ref, 'before': before,
-               'after': after}
+        doc = {'repository': repository, 'ref': ref,
+               'before': before, 'after': after,
+               'created': created, 'deleted': deleted}
 
         if not deleted:
             last_commit = after
