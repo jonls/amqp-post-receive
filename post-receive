@@ -94,8 +94,10 @@ if __name__ == '__main__':
             commits = list(git_get_commits(last_commit, first_commit))
             doc['commits'] = commits
 
+        properties = pika.BasicProperties(content_type='application/json')
         channel.basic_publish(exchange='git',
                               routing_key=repo_name,
-                              body=json.dumps(doc))
+                              body=json.dumps(doc),
+                              properties=properties)
 
     connection.close()
